@@ -1,0 +1,387 @@
+load "ff-Ipopt"
+load "ffrandom"
+load "lapack"
+load "ff-NLopt"
+load "msh3"
+load "medit"
+load "tetgen"
+load "mmg3d-v4.0"
+
+
+
+// Maximize the minimal relative perimeter in 2D
+// Fourier parametrization of the boundary
+// Modica Mortola used for the computation
+
+verbosity = 0;
+
+// Various parameters
+
+real vtarget = 4*pi/3; // target area for the domain D
+real Prop=0.25;        // Proportion for the Modica-Mortola computation
+real epst = 0.1;     // Epsilon in MM
+int niter = 120;        // number of iterations
+real alpha = 0.01;     // descent step
+int meshpar = 200;     //  mesh size
+macro Pk P1//
+
+real hh = 0.05;
+real hs = 0.1;
+int mm = 2;
+int nn = 2;
+real[int,int] CC(mm,nn),DD(mm,nn);
+real[int,int] gC(mm,nn),gD(mm,nn);
+real AA,BB,gA,gB;
+AA=0;BB=1;CC=0;DD=0;
+gA=0;gB=0;gC=0;gD=0;
+CC(1,0)=0.1;
+CC(1,1)=-0.1;
+CC(0,0)=0.05;
+DD(1,1)=-0.1;
+
+
+int saving=0;
+
+func real[int] rand(int h){
+  randinit(randint32() );
+  real[int] vec(h);
+  for(int i = 0;i<h;i++){
+     vec(i) = 2*randreal1()-1;
+  }
+  return vec;
+}
+
+// evaluation of a trigonometric polynomial
+func real ptrig(real s,real t) {
+  real Sum = AA*s+BB;   // initialize sum
+  for(int i=0;i<mm;i++){
+    for(int j=0;j<nn;j++){
+        Sum+=(
+              CC(i,j)*sin(2*(i+1)*s)*cos((j+1)*t)
+             +DD(i,j)*sin(2*(i+1)*s)*sin((j+1)*t));
+    }
+  }
+  return Sum;
+}
+
+func real ptrigdx(real s,real t) {
+  real Sum = AA;   // initialize sum
+  for(int i=0;i<mm;i++){
+    for(int j=0;j<nn;j++){
+        Sum+=(
+              2*(i+1)*CC(i,j)*cos(2*(i+1)*s)*cos((j+1)*t)
+              +2*(i+1)*DD(i,j)*cos(2*(i+1)*s)*sin((j+1)*t));
+    }
+  }
+  return Sum;
+}
+
+func real ptrigdy(real s,real t) {
+  real Sum = 0;   // initialize sum
+  for(int i=0;i<mm;i++){
+    for(int j=0;j<nn;j++){
+        Sum+=(
+              -(j+1)*CC(i,j)*sin(2*(i+1)*s)*sin((j+1)*t)
+              +(j+1)*DD(i,j)*sin(2*(i+1)*s)*cos((j+1)*t));
+    }
+  }
+  return Sum;
+}
+
+
+mesh Th;
+
+// Objective function
+func real f(real aaa){
+
+   func f1 = ptrig(x,y)*cos(x)*cos(y);
+	func f2 = ptrig(x,y)*cos(x)*sin(y);
+	func f3 = ptrig(x,y)*sin(x);
+// Partial derivative of the parametrization DF
+	func f1x = ptrigdx(x,y)*cos(x)*cos(y)  
+               -ptrig(x,y)*sin(x)*cos(y);
+	func f1y = ptrigdy(x,y)*cos(x)*cos(y)
+               -ptrig(x,y)*cos(x)*sin(y);
+	func f2x = ptrigdx(x,y)*cos(x)*sin(y)
+               -ptrig(x,y)*sin(x)*sin(y);
+	func f2y = ptrigdy(x,y)*cos(x)*sin(y)
+               +ptrig(x,y)*cos(x)*cos(y);
+	func f3x = ptrigdx(x,y)*sin(x)
+               +ptrig(x,y)*cos(x);
+	func f3y = ptrigdy(x,y)*sin(x);
+//M = DF^t DF
+func m11 = f1x^2 + f2x^2 + f3x^2;
+func m21 = f1x*f1y + f2x*f2y + f3x*f3y;
+func m22 = f1y^2 + f2y^2 + f3y^2;
+
+// Periodic condition
+func perio = [[4, y], [2, y],[1, x], [3, x]];
+//func perio = [[4, y], [2, y]];
+//, 
+
+   // Mesh 2D
+   Th = square(10, 20, [x*pi-pi/2, 2*y*pi]);
+   //plot(Th); 
+
+
+// Mesh adaptation
+real vv = 1/hs^2;
+real sf = 1/hs;
+/*{
+ fespace VhMetric(Th,P1);
+ VhMetric F1x = sf*f1x,F2x = sf*f2x, F3x = sf*f3x, F1y=sf*f1y, F2y=sf*f2y,F3y=sf*f3y;
+ VhMetric M11 = F1x^2+F2x^2+F3x^2,M22 = F1y^2+F2y^2+F3y^2,
+          M12 = F1x*F1y+F2x*F2y+F3x*F3y;
+ 
+ Th = adaptmesh(Th, metric = [M11[],M12[],M22[]], inquire=0,  periodic=perio,nbvx=50000);
+ plot(Th,cmm="adapt 1");
+}*/
+Th = adaptmesh(Th, m11*vv, m21*vv, m22*vv, IsMetric=1,inquire=0, periodic=perio,nbvx=50000);
+plot(Th,cmm="adapt 1");
+Th = adaptmesh(Th, m11*vv, m21*vv, m22*vv, IsMetric=1,inquire=0, periodic=perio,nbvx=50000);
+plot(Th,cmm="adapt 2");
+Th = adaptmesh(Th, m11*vv, m21*vv, m22*vv, IsMetric=1,inquire=0, periodic=perio,nbvx=50000);
+plot(Th,cmm="adapt 3");
+Th = adaptmesh(Th, m11*vv, m21*vv, m22*vv, IsMetric=1,inquire=0, periodic=perio,nbvx=50000);
+plot(Th,cmm="adapt 4");
+
+// Sphere
+meshS ThS = movemesh23(Th, transfo=[f1, f2, f3]);
+plot(ThS,cmm="Surface mesh");
+
+{
+  fespace VhStemp(ThS,P1);
+  VhStemp up = x;
+  //plot(up,fill=1,wait=1);
+}
+
+real[int] domain = [0.,0.,0.,1,hh/10.0];
+
+
+mesh3 Th3=tetg(ThS,switch="pa0.001AQ",nbofregions=1,regionlist=domain);
+plot(Th3,cmm="final 3d mesh");
+
+int[int] newlabel = [1,0];
+
+Th3 = tetgreconstruction(Th3,switch="raAQ",
+    nbofregions=1,regionlist=domain,sizeofvolume=0.005);
+
+{
+func  newlabel = ( z<1e5 ) ? 0 : label;
+Th3 = change(Th3,flabel=newlabel);
+}
+
+{
+   fespace Vhtemp(Th3,P1);
+   Vhtemp ff=1;
+   real vv = int3d(Th3)(ff);
+   real fact = (vtarget/vv)^(1.0/3.0);
+   Th3 = movemesh3(Th3,transfo=[fact*x,fact*y,fact*z]);
+   AA = fact*AA;
+   BB = fact*BB;
+   CC = fact*CC;
+   DD = fact*DD;
+}
+
+   // Finite elements
+   fespace Vh(Th3,Pk);
+   fespace Vh0(Th3,P0); 
+   Vh u,v;
+   int NN = Vh.ndof;
+
+   Vh0 hh = hTriangle;
+   cout << "Mesh size: " << hh[].min << " " << hh[].max << "  nv: " << Vh.ndof << endl;
+
+   // Modica Mortola stuff!!
+   macro Grad(u) [dx(u),dy(u),dz(u)]//
+
+	varf a(u,v) = int3d(Th3)(Grad(u)'*Grad(v));
+	varf b(u,v) = int3d(Th3)(u*v);
+
+	matrix K = a(Vh,Vh);
+	matrix M = b(Vh,Vh);
+	
+	real[int] ones(NN);
+	ones = 1;
+   real[int] cvec = M*ones; // constraint vector
+	real nc = cvec'*cvec;
+
+	// epst*int(grad(u)^2)+1/epst*int(u^2*(1-u)^2)
+	
+   // Define objective function and gradient
+	func real J(real[int] &V){
+   	real[int] uV = ones-V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real val = epst*(V'*p1)+1/epst*(v'*p2);
+		//real val = epst*((K*V)'*V)+1/epst*(v'*p2)	;
+   	return val;
+	}
+
+	func real[int] GradJ(real[int] &V){
+   	u[] = V; //plot(u,fill=1);
+   	real[int] ones(V.n);
+   	ones = 1;
+   	real[int] uV = ones-V;
+   	real[int] u2V = ones-2*V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real[int] gradt(V.n);
+   	real[int] p3 = p2.*u2V;
+   	gradt = 2*epst*p1+2/epst*p3;
+  	   gradt = (-(gradt'*cvec)/nc)*cvec+gradt;
+   	return gradt;
+	}
+	//u = 0.5*(sin(15*(x))+cos(15*(y))-1); // maybe previous u should be here
+
+   real val=1e16; int nruns = 10;
+   Vh usol,ff=1;
+   real vol = int3d(Th3)(ff);
+   cout << "Volume: " << vol << endl;
+
+   for(int i=0;i<nruns;i++){
+   	u[] = rand(Vh.ndof);
+		real initvol = int3d(Th3)(u);
+   	u  = u-initvol/vol+Prop; // project Initialization on the constraint
+
+		//plot(u,fill=1,value=1,cmm="Init",wait=1);
+   	real tval = nloptLBFGS(J,u[],grad=GradJ,nGradStored=15);
+      if(tval<val){val=tval;usol[]=u[];}
+   }
+   u[] = usol[];
+   plot(u,fill=1,cmm="final",nbiso=10);
+   
+
+  // Shape derivative
+  Vh0 grh = epst*(dx(u)^2+dy(u)^2+dz(u)^2)+1/epst*u^2*(1-u)^2;
+  
+  // Convert to gradient w.r.t. Fourier coefficients
+  // gradt(0) = int1d(Th,1)(grh*(x*N.x+y*N.y)/sqrt(x^2+y^2));
+
+  fespace VhS(ThS,P1);
+  VhS Phi, Theta,Rho;
+  Phi = atan2(z,sqrt(x^2+y^2));
+  Theta = atan2(y,x);
+  Rho = sqrt(x^2+y^2+z^2);	
+
+  
+  
+  //plot(Theta,fill=1,wait=1);
+  //plot(Phi,fill=1,wait=1);
+
+  int var = 2;
+  
+  if(var==1){
+   gA=int2d(Th3,0)(grh*(x*N.x+y*N.y+z*N.z)*Phi/Rho);
+   gB=int2d(Th3,0)(grh*(x*N.x+y*N.y+z*N.z)/Rho);
+
+  for(int i=0;i<mm;i++){
+    for(int j=0;j<nn;j++){
+   gC(i,j)=int2d(Th3,0)(grh*(x*N.x+y*N.y+z*N.z)*sin(2*(i+1)*Phi)*cos((j+1)*Theta)/Rho);
+   gD(i,j)=int2d(Th3,0)(grh*(x*N.x+y*N.y+z*N.z)*sin(2*(i+1)*Phi)*sin((j+1)*Theta)/Rho);
+    }
+  }
+  }
+  else{
+     VhS Rhos,Dtheta,Dphi,Ratio;
+     Rhos = AA*Phi+BB;
+     Dtheta = 0;
+     Dphi = AA;
+     for(int i=0;i<mm;i++){
+       for(int j=0;j<nn;j++){
+         Rhos=Rhos+CC(i,j)*sin(2*(i+1)*Phi)*cos((j+1)*Theta)
+                  +DD(i,j)*sin(2*(i+1)*Phi)*sin((j+1)*Theta);
+      Dtheta=Dtheta-CC(i,j)*sin(2*(i+1)*Phi)*(j+1)*sin((j+1)*Theta)
+                   +DD(i,j)*sin(2*(i+1)*Phi)*(j+1)*cos((j+1)*Theta);
+       Dphi=Dphi+CC(i,j)*2*(i+1)*cos(2*(i+1)*Phi)*cos((j+1)*Theta)
+                +DD(i,j)*2*(i+1)*cos(2*(i+1)*Phi)*sin((j+1)*Theta);
+       }
+     }
+     Ratio = Rhos/sqrt(Rhos^2+Dtheta^2/cos(Phi)^2+Dphi^2);
+    
+     gA=int2d(Th3,0)(grh*Ratio*Phi);
+     gB=int2d(Th3,0)(grh*Ratio);
+
+  for(int i=0;i<mm;i++){
+    for(int j=0;j<nn;j++){
+  gC(i,j)=int2d(Th3,0)(grh*Ratio*sin(2*(i+1)*Phi)*cos((j+1)*Theta));
+  gD(i,j)=int2d(Th3,0)(grh*Ratio*sin(2*(i+1)*Phi)*sin((j+1)*Theta));
+    }
+  }
+  }
+
+  //cout << " Gradients! " << endl;
+
+  //cout << gA << endl;
+  //cout << gB << endl;
+  //cout << gC << endl;
+  //cout << gD << endl;
+
+  if(saving==1){
+       savemesh(Th3,"CurrentMesh3D.mesh");
+       ofstream fileout("OnePhase3D.data");
+       for(int i=0;i<u[].n;i++){
+           fileout << u[][i] << endl;
+       }
+       Vh U,V;
+       problem Interp(U,V) = int3d(Th3)(U*V)-int3d(Th3)(grh*V);
+       Interp;
+       ofstream fileout2("ShDeriv3D.data");
+       for(int i=0;i<U[].n;i++){
+           fileout2 << U[][i] << endl;
+       }
+   }
+
+  return val;
+}
+
+
+
+real vv = f(0.1);
+vv = f(0.1);
+
+int i=1;
+real[int] vals=vv;
+
+while(i<niter){
+	i=i+1;
+
+   if((i+1)%50==0){ alpha = alpha/2;}
+   
+   AA = AA+alpha*gA;
+   BB = BB+alpha*gB;
+   CC = CC+alpha*gC;
+   DD = DD+alpha*gD;
+
+	real val = f(0.1);
+
+   
+
+
+	cout << "Iter " << i<<  " F val: " << val << " alpha " << alpha <<endl;
+	
+   vals = [vals,val];
+}
+
+saving = 1;
+real final = f(0.1);
+cout << "Optimal computed value: " << final << endl; 
+
+real[int] dis = 1:vals.n;
+plot([dis,vals]);
+
+{
+   ofstream cost("cost3D.data");
+   for(int i=0;i<vals.n;i++){
+       cost << vals[i] << endl;
+   }
+}
+
+
+
+
+
+
+

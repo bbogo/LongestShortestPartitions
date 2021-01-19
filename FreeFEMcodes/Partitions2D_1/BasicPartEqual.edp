@@ -1,0 +1,470 @@
+load "ff-Ipopt"
+load "ffrandom"
+load "lapack"
+load "ff-NLopt"
+
+
+// Maximize the minimal relative perimeter in 2D
+// Fourier parametrization of the boundary
+// Modica Mortola used for the computation
+
+verbosity = 0;
+
+// Various parameters
+
+real areatarget = pi; // target area for the domain D
+real Prop=0.3;        // Proportion for the Modica-Mortola computation
+real epst = 0.05;     // Epsilon in MM
+int niter = 120;        // number of iterations
+real alpha = 0.01;     // descent step
+int meshpar = 100;     //  mesh size
+macro Pk P1//
+int nphi = 3;
+
+real[int] areaC(nphi);
+areaC = 1.0/nphi;
+//real r = 3;
+//areaC = [1,1,r,r,r];
+
+areaC = areaC/areaC.sum;
+
+
+
+int saving=0;
+
+func real[int] rand(int h){
+  randinit(randint32() );
+  real[int] vec(h);
+  for(int i = 0;i<h;i++){
+     vec(i) = 2*randreal1()-1;
+  }
+  return vec;
+}
+
+// evaluation of a trigonometric polynomial
+func real ptrig(real t, real[int] &vect){
+  int n = (vect.n-1)/2;
+  real[int] as = vect(1:n) ;    // coeffs of cos
+  real[int] bs = vect(n+1:2*n); // coeffs of sin
+  real a0 =vect(0);
+  real Sum = a0;   // initialize sum
+  for(int i=0;i<n;i++){Sum+=(as[i]*cos((i+1)*t)+bs[i]*sin((i+1)*t));}
+  return Sum;
+}
+
+mesh Th;
+
+// Objective function
+func real[int] f(real[int] &vec){
+
+   int i;
+   real t;
+
+   real beta = 2;      
+   int m = vec.n;
+   int n = (m-1)/2;
+   real[int] as = vec(1:n) ;
+   real[int] bs = vec(n+1:2*n);
+   real a0 =vec(0);
+
+   // Mesh generation
+   border C(t=0,2* pi){x=cos(t)*ptrig(t,vec);
+                    y=sin(t)*ptrig(t,vec);label=1;}
+   Th = buildmesh (C(meshpar));
+   Th = adaptmesh(Th,iso=1,hmax=epst*0.5,nbvx=50000);
+   //plot(Th); 
+
+   // Voronoi Initialization
+   real[int,int] poly(Th.nbe,2);
+
+	for(int i=0;i<Th.nbe;i++){
+   	 int i1 = Th.be(i)[0];
+   	 int i2 = Th.be(i)[1];
+   	 //cout <<  i1  << " " <<  i2 << endl;
+   	 poly(i,0) = Th(i1).x; 
+   	 poly(i,1) = Th(i1).y;
+	}
+
+	{
+   ofstream fareas("areas.dat");
+   for(int i=0;i<nphi;i++){
+       fareas << areaC[i] << endl;
+   }
+
+   ofstream fcells("ncells.dat");
+   fcells << nphi << endl;
+
+	ofstream fout("coords.dat");	
+   fout.precision(16);
+		for(int i=0;i<Th.nbe;i++){
+   	   if(i==0){
+         	fout << poly(i,0) << " " << poly(i,1) << endl;
+      	}
+      	else 
+         	if(abs(poly(i,0)-poly(i-1,0))>1e-10&&abs(poly(i,1)-poly(i-1,1))>1e-10){
+  		   	   fout << poly(i,0) << " " << poly(i,1) << endl;
+        		}
+			}
+	}
+
+  
+	exec("$HOME/miniconda3/bin/python VoronoiInitPerim.py");
+
+	real[int,int] VoronoiPoints(nphi,2);
+
+	{
+		ifstream fin("VoronoiPoints.dat");	
+		for(int i=0;i<nphi;i++){
+  			fin >> VoronoiPoints(i,0);
+      	fin >> VoronoiPoints(i,1);
+		}
+	}
+
+	//cout << VoronoiPoints << endl;
+
+
+   // Finite elements
+   fespace Vh(Th,Pk);
+   fespace Vh0(Th,P0); 
+   Vh u,v;
+   int NN = Vh.ndof;
+   int totSize = NN*nphi;
+
+   Vh0 hh = hTriangle;
+   cout << "Mesh size: " << hh[].min << " " << hh[].max << "  nv: " << Th.nv << endl;
+   real hmax = hh[].max;
+	//epst = hmax;
+
+   // Modica Mortola stuff!!
+   macro Grad(u) [dx(u),dy(u)]//
+
+	varf a(u,v) = int2d(Th)(Grad(u)'*Grad(v));
+	varf b(u,v) = int2d(Th)(u*v);
+
+	matrix K0 = a(Vh,Vh);
+	matrix M0 = b(Vh,Vh);
+
+	matrix M = M0,K = K0;
+	for(int i=0;i<nphi-1;i++){
+   	M = [[M,0],[0,M0]];
+   	K = [[K,0],[0,K0]];
+	}
+	
+	real[int] ones(NN);
+	ones = 1;
+	real[int] onesFull(NN*nphi);
+	onesFull = 1;
+   real[int] cvec = M0*ones; // constraint vector
+	real nc = cvec'*cvec;
+   real[int] oneCol(nphi); oneCol = 1;
+
+   // projection
+	func real[int] proj(real[int] &vec,real[int] &c,real[int] &d, 	real[int] &pvec) {
+		real[int,int] A(NN,nphi);
+    	for(int i=0;i<nphi;i++){
+       	A(:,i) = vec(i*NN:((i+1)*NN-1));
+    	}  
+    	real[int,int] At = A';
+    	real[int] e(NN); e = A*oneCol; e = (c-e); // sum comp
+    	real[int] f(nphi); f = At*cvec; f = (d-f); // areas...
+
+    	// find weights W from pvec:
+    	real[int,int] W(NN,nphi);
+    	for(int i=0;i<nphi;i++){
+      	real[int] tvec = pvec(i*NN:((i+1)*NN-1));
+       	real[int] uvec = onesFull-tvec;
+       	W(:,i) = tvec.*uvec;
+       	W(:,i) = W(:,i).*W(:,i);
+    	} 
+    	W = 2*W;W = sqrt(W);
+    	real[int] sumW = W*oneCol;
+    	real[int] meanW(nphi); 
+    	for(int i=0;i<nphi;i++){
+      	meanW[i] = cvec'*W(:,i);
+    	}
+
+    	// construct mini matrix:
+    	real[int,int] C(nphi,nphi);
+    	for(int i=0;i<nphi;i++){
+      	for(int j=0;j<nphi;j++){
+        		real[int] integ = W(:,i).*W(:,j);
+        		integ = integ./sumW;
+        		C(i,j) = cvec'*integ; C(i,j) = C(i,j)/meanW[j]; 
+      	}
+    	} 
+
+    	C = -C;
+    
+    	for(int i=0;i<nphi;i++){
+       	C(i,i) = C(i,i)+1;
+    	}
+
+    	real[int,int] Cres = C(0:nphi-2,0:nphi-2);
+
+    	//cout << Cres << endl;
+    	real[int,int] Cinv = Cres^-1;
+
+    	//cout << Cinv << endl;
+
+
+
+    	real[int] q(nphi); 
+  
+    	real[int] factvec(NN);
+    	factvec = e;
+    	for(int i=0;i<nphi;i++){
+       	factvec = factvec - f[i]/meanW[i]*W(:,i);
+    	}
+    	factvec = factvec./sumW;
+
+    	for(int i=0;i<nphi;i++){
+       	real[int] tvec = factvec.*W(:,i);
+       	q[i] = cvec'*tvec;
+    	}
+    	real[int] qq = q(0:nphi-2);
+    	real[int] lambdas(nphi);
+    	lambdas(0:nphi-2)=Cinv*qq;  lambdas(nphi-1) = 0;
+    	real[int] mu(nphi);
+    	for(int i=0;i<nphi;i++){
+       	mu[i] = d[i]-lambdas[i]-cvec'*A(:,i);
+       	mu[i] = mu[i]/meanW[i];
+    	}
+    	real[int] lam(NN);
+    	lam = W*mu; lam = -lam; lam=lam+e; lam = lam./sumW;
+    	for(int i=0;i<nphi;i++){
+        	real[int] tvec = lam.*W(:,i);
+        	A(:,i) = A(:,i)+tvec;
+        	A(:,i) = A(:,i)+mu[i]*W(:,i);
+    	}
+    	
+    	real[int] res(vec.n);
+    	for(int i=0;i<nphi;i++){
+       	res(i*NN:((i+1)*NN-1)) = A(:,i);
+    	} 
+    	return res;
+	}// end proj function
+
+   real[int] holdX(NN*nphi); // vector to hold
+
+	// epst*int(grad(u)^2)+1/epst*int(u^2*(1-u)^2)
+	
+   // Define objective function and gradient
+	func real J(real[int] &V){
+   	real[int] uV = onesFull-V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real val = epst*(V'*p1)+1/epst*(v'*p2);
+   	return val;
+	}
+
+   real[int] czero(NN); czero = 0;
+	real[int] dzero(nphi); dzero = 0;
+
+	func real[int] GradJ(real[int] &V){
+   	holdX = V;
+   	real[int] ones(V.n);
+   	ones = 1;
+   	real[int] uV = ones-V;
+   	real[int] u2V = ones-2*V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real[int] gradt(V.n);
+   	real[int] p3 = p2.*u2V;
+   	gradt = 2*epst*p1+2/epst*p3;
+   	real[int] qqq = 0.5*onesFull;
+   	gradt = proj(gradt,czero,dzero,V);
+		return gradt;
+	}
+	//u = 0.5*(sin(15*(x))+cos(15*(y))-1); // maybe previous u should be here
+	
+
+   real[int] x0(totSize);
+
+	Vh[int] ud(nphi),uVod(nphi);
+
+	real[int] xx(nphi),yy(nphi);
+	xx = VoronoiPoints(:,0);
+	yy = VoronoiPoints(:,1);
+   
+   for(int i=0;i<nphi;i++){
+   	ud[i] = sqrt((x-xx[i])^2+(y-yy[i])^2);
+   	//plot(ud[i],fill=1,cmm="Phase "+i,wait=1);
+  	}
+
+	for(int i=0;i<nphi;i++){
+   	uVod[i] = ud[i];
+   	for(int j=0;j<nphi;j++){
+      	if(j!=i){
+      	   uVod[i]=uVod[i]*(ud[i]<=ud[j]);
+         	
+      	} 
+   	}
+      //plot(uVod[i],fill=1,cmm="Voronoi.... "+i,wait=1);
+	}
+
+	for(int i=0;i<nphi;i++){
+	Vh test = uVod[i]>0;
+   	x0(i*NN:(i+1)*NN-1) = test[];
+	}
+	
+
+	real[int] c(NN); c = 1;
+	real[int] d(nphi); d = Th.area*areaC;
+
+   real[int] qqq =0.9*onesFull;
+	x0 = proj(x0,c,d,qqq);
+
+   real mm = nloptLBFGS(J,x0,grad=GradJ,nGradStored=10
+                            ,stopMaxFEval=5000);
+   real val = J(holdX);
+   cout << val << endl;
+
+   x0 = holdX;
+
+   Vh0 grh = 0;
+   Vh uplot=0;
+  	// Shape derivative
+   for(int i=0;i<nphi;i++){
+      u[] = x0(i*NN:(i+1)*NN-1);
+      uplot = max(uplot,u);
+  		grh = grh+epst*(dx(u)^2+dy(u)^2)+1/epst*u^2*(1-u)^2;
+   }
+ 
+   plot(uplot,fill=1,value=1);
+    
+  	real[int] gradt(vec.n);
+  	// Convert to gradient w.r.t. Fourier coefficients
+   gradt(0) = int1d(Th,1)(grh*(x*N.x+y*N.y)/sqrt(x^2+y^2));
+
+	for (int i=1;i<=n;i++){
+		gradt(i) = int1d(Th,1)(grh*(x*N.x+y*N.y)*
+   		cos(i*atan2(y,x))/sqrt(x^2+y^2));
+	}
+	for (int i=1;i<=n;i++){
+		gradt(i+n) = int1d(Th,1)(grh*(x*N.x+y*N.y)*
+   	sin(i*atan2(y,x))/sqrt(x^2+y^2));
+	}
+
+   if(saving==1){
+       savemesh(Th,"CurrentMesh2D.msh");
+       ofstream fileout("Part2D.data");
+       for(int i=0;i<x0.n;i++){
+           fileout << x0[i] << endl;
+       }
+       Vh U,V;
+       problem Interp(U,V) = int2d(Th)(U*V)-int2d(Th)(grh*V);
+       Interp;
+       ofstream fileout2("ShDeriv2D.data");
+       for(int i=0;i<U[].n;i++){
+           fileout2 << U[][i] << endl;
+       }
+   }
+
+
+
+  	real[int] res = [val,gradt];
+  	return res;
+}
+
+//// area and gradient
+func real[int] farea(real[int] VV){
+	real[int] v = VV;
+	real[int] u = v.*v;
+	int k = u.n; 
+	real[int] ue = u(1:k-1);
+	real arr = 2*pi*(u(0)/2+ue.sum/4);
+	real[int] gradt = VV;
+	gradt(0) = 2*pi*v(0);
+	gradt(1:gradt.n-1) = pi*v(1:v.n-1);
+	real[int] result = [arr,gradt];
+	return result;
+}
+real[int] vect;
+int st = 1;
+if (st==1)
+{
+vect = [1,        -0.5,
+                  0.01,
+                  0.05,
+                  0.1,
+                  0.,
+                  0.03,
+                  0.01, 
+                  0.001,0,0.02,0,0,0,0,0,0];//.1*randreal1()];
+} 
+else {
+ vect = [1,0.0,0,0,0];	
+}
+
+
+cout << vect << endl;
+
+
+
+real[int] far = farea(vect); // compute area and gradient
+real arr = far(0);
+vect = sqrt(areatarget/arr)*vect;
+
+real[int] gradt(vect.n);
+
+// optimization loop
+
+real[int] vals;
+
+int i = 0;
+
+real tol=1e-4;
+while(i<niter){
+	i=i+1;
+	{
+   	ofstream iter("iter.dat");
+      iter << i << endl;  // output iteration number
+   }
+   if(i%20==0){alpha = 0.5*alpha;}
+	//real ar = far(0);
+	//cout<< ar<< endl;
+	//// gradient descent /////
+	real[int] tvect = vect+alpha*gradt;
+	real[int] far = farea(tvect);
+	tvect = sqrt(areatarget/far(0))*tvect;
+
+	far = farea(tvect);
+	real arr = far(0);
+
+	real[int] ggg = f(tvect);
+	real val = ggg(0);
+
+	cout << "Iter " << i<<  " F val: " << val << " Area " << arr <<  " alpha " << alpha <<endl;
+	real[int] tgradt = ggg(1:ggg.n-1); 
+
+   vals = [vals,val];
+   vect   = tvect;
+   gradt  = tgradt;
+   real[int] dis = 1:vals.n;
+	plot([dis,vals],cmm="Iteration "+i);
+}
+
+saving = 1;
+real[int] final = f(vect);
+cout << "Optimal computed value: " << final(0) << endl; 
+cout << "Shape: "<< vect << endl;
+
+real[int] dis = 1:vals.n;
+plot([dis,vals]);
+
+
+{
+   ofstream costs("cost.dat");
+   for(int i=0;i<vals.n;i++){
+       costs << vals[i] << endl;
+   }
+}
+
+
+
+
+
+
+

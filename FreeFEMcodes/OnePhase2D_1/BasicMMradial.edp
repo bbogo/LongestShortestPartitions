@@ -1,0 +1,267 @@
+load "ff-Ipopt"
+load "ffrandom"
+load "lapack"
+load "ff-NLopt"
+
+
+// Maximize the minimal relative perimeter in 2D
+// Fourier parametrization of the boundary
+// Modica Mortola used for the computation
+
+verbosity = 0;
+
+// Various parameters
+
+real areatarget = pi; // target area for the domain D
+real Prop=0.5;        // Proportion for the Modica-Mortola computation
+real epst = 0.05;     // Epsilon in MM
+int niter = 150;        // number of iterations
+real alpha = 0.01;     // descent step
+int meshpar = 200;     //  mesh size
+macro Pk P1//
+
+int saving=0;
+
+func real[int] rand(int h){
+  randinit(randint32() );
+  real[int] vec(h);
+  for(int i = 0;i<h;i++){
+     vec(i) = 2*randreal1()-1;
+  }
+  return vec;
+}
+
+// evaluation of a trigonometric polynomial
+func real ptrig(real t, real[int] &vect){
+  int n = (vect.n-1)/2;
+  real[int] as = vect(1:n) ;    // coeffs of cos
+  real[int] bs = vect(n+1:2*n); // coeffs of sin
+  real a0 =vect(0);
+  real Sum = a0;   // initialize sum
+  for(int i=0;i<n;i++){Sum+=(as[i]*cos((i+1)*t)+bs[i]*sin((i+1)*t));}
+  return Sum;
+}
+
+mesh Th;
+
+// Objective function
+func real[int] f(real[int] &vec){
+
+   int i;
+   real t;
+
+   real beta = 2;      
+   int m = vec.n;
+   int n = (m-1)/2;
+   real[int] as = vec(1:n) ;
+   real[int] bs = vec(n+1:2*n);
+   real a0 =vec(0);
+
+   // Mesh generation
+   border C(t=0,2* pi){x=cos(t)*ptrig(t,vec);
+                    y=sin(t)*ptrig(t,vec);label=1;}
+   Th = buildmesh (C(meshpar));
+   Th= adaptmesh(Th,iso=1,hmax=0.25*epst,nbvx=50000);
+   //plot(Th); 
+
+   // Finite elements
+   fespace Vh(Th,Pk);
+   fespace Vh0(Th,P0); 
+   Vh u,v;
+   int NN = Vh.ndof;
+
+   Vh0 hh = hTriangle;
+   //cout << "Mesh size: " << hh[].min << " " << hh[].max << "  nv: " << Th.nv << endl;
+
+   // Modica Mortola stuff!!
+   macro Grad(u) [dx(u),dy(u)]//
+
+	varf a(u,v) = int2d(Th)(Grad(u)'*Grad(v));
+	varf b(u,v) = int2d(Th)(u*v);
+
+	matrix K = a(Vh,Vh);
+	matrix M = b(Vh,Vh);
+	
+	real[int] ones(NN);
+	ones = 1;
+   real[int] cvec = M*ones; // constraint vector
+	real nc = cvec'*cvec;
+
+	// epst*int(grad(u)^2)+1/epst*int(u^2*(1-u)^2)
+	
+   // Define objective function and gradient
+	func real J(real[int] &V){
+   	real[int] uV = ones-V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real val = epst*(V'*p1)+1/epst*(v'*p2);
+		//real val = epst*((K*V)'*V)+1/epst*(v'*p2)	;
+   	return val;
+	}
+
+	func real[int] GradJ(real[int] &V){
+   	u[] = V; //plot(u,fill=1);
+   	real[int] ones(V.n);
+   	ones = 1;
+   	real[int] uV = ones-V;
+   	real[int] u2V = ones-2*V;
+   	real[int] v = V.*uV;
+   	real[int] p1 = K*V;
+   	real[int] p2 = M*v;
+   	real[int] gradt(V.n);
+   	real[int] p3 = p2.*u2V;
+   	gradt = 2*epst*p1+2/epst*p3;
+  	   gradt = (-(gradt'*cvec)/nc)*cvec+gradt;
+   	return gradt;
+	}
+	//u = 0.5*(sin(15*(x))+cos(15*(y))-1); // maybe previous u should be here
+
+   real val=1e16; int nruns = 10;
+   Vh usol;
+
+   for(int i=0;i<nruns;i++){
+   	u[] = rand(Vh.ndof);
+		real initvol = int2d(Th)(u);
+   	u  = u-initvol/Th.area+Prop; // project Initialization on the constraint
+
+		//plot(u,fill=1,value=1,cmm="Init",wait=1);
+   	real tval = nloptLBFGS(J,u[],grad=GradJ,nGradStored=15);
+      if(tval<val){val=tval;usol[]=u[];}
+   }
+   u[] = usol[];
+   
+
+  // Shape derivative
+  Vh0 grh = epst*(dx(u)^2+dy(u)^2)+1/epst*u^2*(1-u)^2;
+  
+  real[int] gradt(vec.n);
+  // Convert to gradient w.r.t. Fourier coefficients
+   gradt(0) = int1d(Th,1)(grh*(x*N.x+y*N.y)/sqrt(x^2+y^2));
+
+	for (int i=1;i<=n;i++){
+		gradt(i) = int1d(Th,1)(grh*(x*N.x+y*N.y)*
+   		cos(i*atan2(y,x))/sqrt(x^2+y^2));
+	}
+	for (int i=1;i<=n;i++){
+		gradt(i+n) = int1d(Th,1)(grh*(x*N.x+y*N.y)*
+   	sin(i*atan2(y,x))/sqrt(x^2+y^2));
+	}
+   
+   plot(u,fill=1,cmm="final");
+   if(saving==1){
+       savemesh(Th,"CurrentMesh2D.msh");
+       ofstream fileout("OnePhase2D.data");
+       for(int i=0;i<u[].n;i++){
+           fileout << u[][i] << endl;
+       }
+       Vh U,V;
+       problem Interp(U,V) = int2d(Th)(U*V)-int2d(Th)(grh*V);
+       Interp;
+       ofstream fileout2("ShDeriv2D.data");
+       for(int i=0;i<U[].n;i++){
+           fileout2 << U[][i] << endl;
+       }
+   }
+//////////////////
+  real[int] res = [val,gradt];
+  return res;
+}
+
+//// area and gradient
+func real[int] farea(real[int] VV){
+	real[int] v = VV;
+	real[int] u = v.*v;
+	int k = u.n; 
+	real[int] ue = u(1:k-1);
+	real arr = 2*pi*(u(0)/2+ue.sum/4);
+	real[int] gradt = VV;
+	gradt(0) = 2*pi*v(0);
+	gradt(1:gradt.n-1) = pi*v(1:v.n-1);
+	real[int] result = [arr,gradt];
+	return result;
+}
+real[int] vect;
+int st = 1;
+if (st==1)
+{
+vect = [1,        -0.5,
+                  0.01,
+                  0.05,
+                  0.1,
+                  0.,
+                  0.03,
+                  0.03, 
+                  0.001,0,0,0.01,0,0.001,-0.000001,0.001,0.0001];//.1*randreal1()];
+} 
+else {
+ vect = [1,0.0,0,0,0];	
+}
+
+
+cout << vect << endl;
+
+
+
+real[int] far = farea(vect); // compute area and gradient
+real arr = far(0);
+vect = sqrt(areatarget/arr)*vect;
+
+real[int] ggg = f(vect);
+real[int] gradt = ggg(1:ggg.n-1); 
+
+gradt = gradt;
+// optimization loop
+
+real[int] vals;
+//vals = [];
+
+int i = 0;
+
+real tol=1e-4;
+while(i<niter){
+	i=i+1;
+	if(i%50==0){alpha = 0.5*alpha;}
+	real[int] tvect = vect+alpha*gradt;
+	real[int] far = farea(tvect);
+	tvect = sqrt(areatarget/far(0))*tvect;
+
+	far = farea(tvect);
+	real arr = far(0);
+
+	real[int] ggg = f(tvect);
+
+	//cout << ggg << endl;
+	real val = ggg(0);
+	cout << "Iter " << i<<  " F val: " << val << " Area " << arr <<  " alpha " << alpha <<endl;
+	real[int] tgradt = ggg(1:ggg.n-1); 
+   vals = [vals,val];
+   vect   = tvect;
+   gradt  = tgradt;
+   real[int] dis = 1:vals.n;
+   plot([dis,vals],cmm="Iteration "+i);
+}
+
+saving = 1;
+real[int] final = f(vect);
+cout << "Optimal computed value: " << final(0) << endl; 
+cout << "Shape: "<< vect << endl;
+
+real[int] dis = 1:vals.n;
+plot([dis,vals]);
+
+{
+   ofstream cost("cost.data");
+   for(int i=0;i<vals.n;i++){
+       cost << vals[i] << endl;
+   }
+}
+
+
+
+
+
+
+
+
+
