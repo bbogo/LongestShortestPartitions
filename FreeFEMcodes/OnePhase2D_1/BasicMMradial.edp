@@ -1,27 +1,40 @@
-load "ff-Ipopt"
-load "ffrandom"
-load "lapack"
-load "ff-NLopt"
+// Code for the paper: "Longest minimal length partitions"
+// Authors: Beniamin Bogosel and Edouard Oudet
+// Date: February 2021
+
+// If you use parts of the code in your work, please give credit
+// by citing our work!
 
 
 // Maximize the minimal relative perimeter in 2D
 // Fourier parametrization of the boundary
 // Modica Mortola used for the computation
 
+
+
+load "ff-Ipopt"
+load "ffrandom"
+load "lapack"
+load "ff-NLopt"
+
+
 verbosity = 0;
 
 // Various parameters
 
 real areatarget = pi; // target area for the domain D
-real Prop=0.5;        // Proportion for the Modica-Mortola computation
-real epst = 0.05;     // Epsilon in MM
+// Constraint of for the area fraction for the minimal-relative perimeter subset 
+real Prop=0.5;        
+real epst = 0.05;     // Epsilon in Modica-Mortola
 int niter = 150;        // number of iterations
 real alpha = 0.01;     // descent step
 int meshpar = 200;     //  mesh size
-macro Pk P1//
+macro Pk P1//              Finite element type
+int nruns = 5; // number of runs of the optimization algorithm for the Modica-Mortola problem
 
-int saving=0;
+int saving=0;          // parameter for saving information during the optimization process
 
+// function for producing a random vector of a given size
 func real[int] rand(int h){
   randinit(randint32() );
   real[int] vec(h);
@@ -32,6 +45,7 @@ func real[int] rand(int h){
 }
 
 // evaluation of a trigonometric polynomial
+// inputs: t and the vector of coefficients
 func real ptrig(real t, real[int] &vect){
   int n = (vect.n-1)/2;
   real[int] as = vect(1:n) ;    // coeffs of cos
@@ -42,9 +56,10 @@ func real ptrig(real t, real[int] &vect){
   return Sum;
 }
 
+// define a mesh variable to keep in memory
 mesh Th;
 
-// Objective function
+// Objective function: inputs - Fourier coefficients
 func real[int] f(real[int] &vec){
 
    int i;
@@ -57,14 +72,19 @@ func real[int] f(real[int] &vec){
    real[int] bs = vec(n+1:2*n);
    real a0 =vec(0);
 
-   // Mesh generation
+   // Mesh generation using trigonometric polynomials
+   // for evaluating the radial function
    border C(t=0,2* pi){x=cos(t)*ptrig(t,vec);
-                    y=sin(t)*ptrig(t,vec);label=1;}
+                       y=sin(t)*ptrig(t,vec);
+                       label=1;}
    Th = buildmesh (C(meshpar));
+   // Adapt the mesh so that the maximum size is smaller than
+   //    epsilon in Modica-Mortola functional
    Th= adaptmesh(Th,iso=1,hmax=0.25*epst,nbvx=50000);
-   //plot(Th); 
+   // plot the mesh
+   plot(Th); 
 
-   // Finite elements
+   // Finite element spaces
    fespace Vh(Th,Pk);
    fespace Vh0(Th,P0); 
    Vh u,v;
@@ -73,9 +93,10 @@ func real[int] f(real[int] &vec){
    Vh0 hh = hTriangle;
    //cout << "Mesh size: " << hh[].min << " " << hh[].max << "  nv: " << Th.nv << endl;
 
-   // Modica Mortola stuff!!
+   // a macro for the gradient
    macro Grad(u) [dx(u),dy(u)]//
 
+    // Compute stiffness and rigidity matrices in FreeFEM
 	varf a(u,v) = int2d(Th)(Grad(u)'*Grad(v));
 	varf b(u,v) = int2d(Th)(u*v);
 
@@ -83,9 +104,9 @@ func real[int] f(real[int] &vec){
 	matrix M = b(Vh,Vh);
 	
 	real[int] ones(NN);
-	ones = 1;
-   real[int] cvec = M*ones; // constraint vector
-	real nc = cvec'*cvec;
+	ones = 1; // define a vector of ones
+    real[int] cvec = M*ones; // constraint vector
+	real nc = cvec'*cvec;    // and its norm squared
 
 	// epst*int(grad(u)^2)+1/epst*int(u^2*(1-u)^2)
 	
@@ -96,10 +117,10 @@ func real[int] f(real[int] &vec){
    	real[int] p1 = K*V;
    	real[int] p2 = M*v;
    	real val = epst*(V'*p1)+1/epst*(v'*p2);
-		//real val = epst*((K*V)'*V)+1/epst*(v'*p2)	;
    	return val;
 	}
 
+    // Gradient of the objective function
 	func real[int] GradJ(real[int] &V){
    	u[] = V; //plot(u,fill=1);
    	real[int] ones(V.n);
@@ -115,24 +136,26 @@ func real[int] f(real[int] &vec){
   	   gradt = (-(gradt'*cvec)/nc)*cvec+gradt;
    	return gradt;
 	}
-	//u = 0.5*(sin(15*(x))+cos(15*(y))-1); // maybe previous u should be here
 
-   real val=1e16; int nruns = 10;
+   real val=1e16; 
    Vh usol;
 
    for(int i=0;i<nruns;i++){
-   	u[] = rand(Vh.ndof);
-		real initvol = int2d(Th)(u);
-   	u  = u-initvol/Th.area+Prop; // project Initialization on the constraint
+        // random initialization for the density
+        u[] = rand(Vh.ndof);
+	    real initvol = int2d(Th)(u);
+	    // project Initialization on the integral constraint
+    	u  = u-initvol/Th.area+Prop; 
 
-		//plot(u,fill=1,value=1,cmm="Init",wait=1);
-   	real tval = nloptLBFGS(J,u[],grad=GradJ,nGradStored=15);
-      if(tval<val){val=tval;usol[]=u[];}
+		// minimize the Modica-Mortola functional
+		real tval = nloptLBFGS(J,u[],grad=GradJ,nGradStored=15);
+		// check if we obtain a better local minimum than before
+        if(tval<val){val=tval;usol[]=u[];}
    }
    u[] = usol[];
    
 
-  // Shape derivative
+  // Shape derivative evaluation
   Vh0 grh = epst*(dx(u)^2+dy(u)^2)+1/epst*u^2*(1-u)^2;
   
   real[int] gradt(vec.n);
@@ -149,6 +172,7 @@ func real[int] f(real[int] &vec){
 	}
    
    plot(u,fill=1,cmm="final");
+   // save mesh and iteration information (optional)
    if(saving==1){
        savemesh(Th,"CurrentMesh2D.msh");
        ofstream fileout("OnePhase2D.data");
@@ -167,8 +191,10 @@ func real[int] f(real[int] &vec){
   real[int] res = [val,gradt];
   return res;
 }
+// ==== end of objective function === //
 
-//// area and gradient
+// area and its gradient as a function of
+// the Fourier coefficients of the radial function 
 func real[int] farea(real[int] VV){
 	real[int] v = VV;
 	real[int] u = v.*v;
@@ -181,6 +207,9 @@ func real[int] farea(real[int] VV){
 	real[int] result = [arr,gradt];
 	return result;
 }
+
+
+// Initialization for the maximization algorithm
 real[int] vect;
 int st = 1;
 if (st==1)
@@ -198,58 +227,74 @@ else {
  vect = [1,0.0,0,0,0];	
 }
 
-
+// Show the initialization
 cout << vect << endl;
 
 
 
 real[int] far = farea(vect); // compute area and gradient
 real arr = far(0);
-vect = sqrt(areatarget/arr)*vect;
+ // rescale to verify the area constraint
+vect = sqrt(areatarget/arr)*vect; 
 
+// initial evaluation of the objective function
 real[int] ggg = f(vect);
+// store the gradient
 real[int] gradt = ggg(1:ggg.n-1); 
 
-gradt = gradt;
-// optimization loop
 
+// define a vector to store the values of the objective function
 real[int] vals;
-//vals = [];
 
+// index for iterations
 int i = 0;
 
-real tol=1e-4;
+
+// optimization loop - gradient flow
 while(i<niter){
 	i=i+1;
+	// decrease the step size every 50 iterations
 	if(i%50==0){alpha = 0.5*alpha;}
+	// advance in the direction of the gradient
 	real[int] tvect = vect+alpha*gradt;
 	real[int] far = farea(tvect);
+	// rescale to have the right area
 	tvect = sqrt(areatarget/far(0))*tvect;
-
+    
+    // test to see if the new area is correct
 	far = farea(tvect);
 	real arr = far(0);
 
+    // evaluate the obejctive function
 	real[int] ggg = f(tvect);
 
-	//cout << ggg << endl;
 	real val = ggg(0);
+	
+    // Display iteration information
 	cout << "Iter " << i<<  " F val: " << val << " Area " << arr <<  " alpha " << alpha <<endl;
+	
+	// get the new gradient information
 	real[int] tgradt = ggg(1:ggg.n-1); 
-   vals = [vals,val];
-   vect   = tvect;
-   gradt  = tgradt;
-   real[int] dis = 1:vals.n;
-   plot([dis,vals],cmm="Iteration "+i);
+	// store the current value of the objective function
+    vals = [vals,val];
+    vect   = tvect;
+    gradt  = tgradt;
+    real[int] dis = 1:vals.n;
+    // plot the evolution of the cost function
+    plot([dis,vals],cmm="Iteration "+i);
 }
 
+// Save the information for the last shape
 saving = 1;
 real[int] final = f(vect);
 cout << "Optimal computed value: " << final(0) << endl; 
 cout << "Shape: "<< vect << endl;
 
+// plot the evolution of the objective function
 real[int] dis = 1:vals.n;
 plot([dis,vals]);
 
+// save information regarding the objective function
 {
    ofstream cost("cost.data");
    for(int i=0;i<vals.n;i++){
