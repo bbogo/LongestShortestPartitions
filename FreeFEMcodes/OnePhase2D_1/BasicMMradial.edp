@@ -24,7 +24,7 @@ verbosity = 0;
 
 real areatarget = pi; // target area for the domain D
 // Constraint of for the area fraction for the minimal-relative perimeter subset 
-real Prop=0.5;        
+real Prop=0.25;        
 real epst = 0.05;     // Epsilon in Modica-Mortola
 int niter = 150;        // number of iterations
 real alpha = 0.01;     // descent step
@@ -154,9 +154,13 @@ func real[int] f(real[int] &vec){
    }
    u[] = usol[];
    
+  // Compute Lagrange multiplier 
+  real lambda =    -1/(epst*Th.area)*int2d(Th,qforder=3)(2*u*(1-u)*(1-2*u));
+ 
 
   // Shape derivative evaluation
-  Vh0 grh = epst*(dx(u)^2+dy(u)^2)+1/epst*u^2*(1-u)^2;
+  Vh0 grh = epst*(dx(u)^2+dy(u)^2)+1/epst*u^2*(1-u)^2
+           +lambda*(u-Prop);
   
   real[int] gradt(vec.n);
   // Convert to gradient w.r.t. Fourier coefficients

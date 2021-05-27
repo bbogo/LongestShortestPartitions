@@ -18,7 +18,7 @@ load "ff-NLopt"
 load "msh3"
 load "medit"
 load "tetgen"
-load "mmg3d-v4.0"
+load "mmg"
 
 verbosity = 0;
 
@@ -164,12 +164,16 @@ func real f(real aaa){
 
     // use tetgen to build a 3D mesh from the surface mesh
 	mesh3 Th3=tetg(ThS,switch="pa0.001AQ",nbofregions=1,regionlist=domain);
-	plot(Th3,cmm="final 3d mesh");
+
 
 	int[int] newlabel = [1,0];
 
 	Th3 = tetgreconstruction(Th3,switch="raAQ",
     nbofregions=1,regionlist=domain,sizeofvolume=0.005);
+    
+    Th3 = mmg3d(Th3,hmin=0.5*hs,hmax=0.6*hs,hgrad=1.1,verbose=-1,optim=1);
+
+		plot(Th3,cmm="final 3d mesh");
 
     // Change label of surface mesh
 	{
@@ -261,9 +265,12 @@ func real f(real aaa){
    u[] = usol[];
    plot(u,fill=1,cmm="final",nbiso=10);
    
+   
+  real lambda = -1/(epst*vtarget)*int3d(Th3)(2*u*(1-u)*(1-2*u)); 
 
   // Shape derivative
-  Vh0 grh = epst*(dx(u)^2+dy(u)^2+dz(u)^2)+1/epst*u^2*(1-u)^2;
+  Vh0 grh = epst*(dx(u)^2+dy(u)^2+dz(u)^2)+1/epst*u^2*(1-u)^2
+           +lambda*(u-Prop);
   
   // Convert to gradient w.r.t. Fourier coefficients
   // look into the paper to understand the formulas
